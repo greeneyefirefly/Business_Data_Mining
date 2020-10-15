@@ -1,0 +1,166 @@
+---
+output:
+  html_document:
+    toc_depth: 4
+---
+***
+
+<div align = "center">
+*Application of Multinomial Logistic Regression using R.*  
+________________________  
+Samantha Deokinanan  
+CUNY MSDS DATA 621 Blog #3  
+October 13th, 2020  
+</div>
+
+***
+
+#### **Background**
+
+Multinomial models are linear statistical models for which the response variable is a factor with over two levels. These models (also termed as generalized logit models) are extensions to the more familiar binomial logistic regression or logit models. The independent variables can be dichotomous or continuous. Similar to binary logistic regression, multinomial logistic regression uses maximum likelihood estimation to test the probability of categorical membership.
+
+Assume that Y is a categorical variable with levels A, B, and C, and that there are m predictors $X^{(1)}, X^{(2)},..., X^{(m)}$. Define the following quantities:
+
+\begin{equation}
+\begin{aligned}
+p_A = P\left[ Y = A|X \right] \\
+p_B = P\left[ Y = B|X \right] \\
+p_C = P\left[ Y = C|X \right] \\
+\end{aligned}
+\end{equation}
+
+A multinomial logistic regression model has the following form:
+
+\begin{equation}
+\begin{aligned}
+\ln\left[\frac{p_A}{p_C} \right] = \beta_{0,1} + \beta_{1,1}\cdot X^{(1)} + \beta_{2,1}\cdot X^{(2)} + ... + \beta_{m,1}\cdot X^{(m)} \\
+
+\ln\left[\frac{p_B}{p_C} \right] = \beta_{0,2} + \beta_{1,2}\cdot X^{(1)} + \beta_{2,2}\cdot X^{(2)} + ... + \beta_{m,2}\cdot X^{(m)}
+\end{aligned}
+\end{equation}
+
+* Since $p_A + p_B + p_C = 1$, if $\ln\left[\frac{p_A}{p_C} \right]$ and $\ln\left[\frac{p_B}{p_C} \right]$ are known, then all three probabilities can be calculated.
+
+* If the response variable has k classes, then the multinomial logistic regression model will need to consist of k−1 equations.
+
+* The expression $p_Y/p_X$ is referred to as the relative odds ratio of Y with respect to X.
+
+#### **Example**
+
+To demonstrate this analysis data set utilized is a frequency table from a Copenhagen housing conditions survey from the `MASS` library. The `housing` data is transformed into 1681 rows and 5 variables.
+
+* Sat - Satisfaction of householders with their present housing circumstances, (High, Medium or Low, ordered factor).  
+* Infl - Perceived degree of influence householders have on the management of the property (High, Medium, Low).  
+* Type - Type of rental accommodation, (Tower, Atrium, Apartment, Terrace).  
+* Cont - Contact residents are afforded with other residents, (Low, High).  
+* Freq - Frequencies: the numbers of residents in each class.  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center', message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(MASS)
+library(tidyverse)
+library(nnet)
+library(effects)
+
+t = housing$Freq
+housing.df = as.data.frame(apply(housing, 2, function(x)rep(x, t)), row.names = FALSE)
+head(housing.df) %>% knitr::kable(caption = "Conditions of Copenhagen Housing")
+
+# Format categorical variables
+housing.df$Sat = factor(housing.df$Sat, levels = c("Low", "Medium", "High"))
+housing.df$Infl = factor(housing.df$Infl, levels = c("Low", "Medium", "High"))
+housing.df$Type = factor(housing.df$Type)
+housing.df$Cont = factor(housing.df$Cont, levels = c("Low", "High"))
+str(housing.df)
+summary(housing.df)
+```
+
+##### **Building the Model**
+
+Multinomial logistic regression reports the odds of being in the different outcome categories about some base groups. A model is built to capture the odds of the satisfaction of householders with their present housing circumstances, `Sat`, based on the independent variables. Because there are three levels to `Sat`, the model will report two distinct sets of regression results corresponding to the following two models.
+
+\[
+log(\frac{Pr(Sat=Medium)}{Pr(Sat=Low)}) = \beta_0 + \beta_1 (Infl) + \beta_2 (Type) + \beta_3 (Cont) + \varepsilon \\
+log(\frac{Pr(Sat=High)}{Pr(Sat=Low)}) = \beta_0 + \beta_1 (Infl) + \beta_2 (Type) + \beta_3 (Cont) + \varepsilon
+\]
+
+In this case, the "Low" satisfaction is treated as the reference group. Now, using the `multinom()` command from the `nnet` package, a multinomial log-linear models via neural networks is fitted. 
+
+```{r}
+model = multinom(Sat ~ Infl + Type + Cont, data = housing.df)
+summary(model)
+```
+
+The model-running output includes some iteration history, and the final negative log-likelihood is 1735.04. This value multiplied by two is the residual deviance and it can be used in comparisons of nested models.
+
+The summary results in the two models when "Low" is the reference point. In other words, the rows with `Medium` are for the model comparing the probability of having a "Medium" satisfaction level versus a "Low" satisfaction level. While the rows with `High` are for the model comparing the probability of having a "High" satisfaction level versus a "Low" satisfaction level.
+
+Next, p-value calculation for the regression coefficients is done using Wald tests to determine whether coefficients are significant or not at $\alpha = 0.05$.
+
+```{r}
+z = summary(model)$coefficients/summary(model)$standard.errors
+(1 - pnorm(abs(z), 0, 1)) * 2
+```
+
+##### **Model Plots & Interpretation**
+
+Thus, the final model becomes:
+
+\[
+log(\frac{Pr(\hat{Sat}=Medium)}{Pr(Sat=Low)}) = -0.85 + 0.46 (Infl_{Medium}) + 0.66 (Infl_{high}) + 0.57 (Type_{Atrium}) + 0.44 (Type_{Tower}) + 0.36 (Cont_{High}) \\
+log(\frac{Pr(\hat{Sat}=Medium)}{Pr(Sat=Low)}) = -0.87 + 0.73 (Infl_{Medium}) + 1.61 (Infl_{high}) - 0.68 (Type_{Terrace}) + 0.74 (Type_{Tower}) + 0.48 (Cont_{High})
+\]
+
+where 
+
+* The *log-odds* for 'Medium' satisfaction vs. 'Low' satisfaction will have: 
+  + $Infl$: increase by 0.46 if moving from "low" to "medium", and by 0.66 if moving from "low" to "high" in the perceived degree of influence.
+
+  + $Type$: increase by 0.57 if moving from "Apartment" to "Atrium", and by 0.44 if moving from "Apartment" to "Tower" based on the type of rental accommodation.
+
+  + $Cont$: increase by 0.36 if moving from "low" to "high" in that contact residents are afforded with other residents.
+
+* The *log-odds* for 'High' satisfaction vs. 'Low' satisfaction will have: 
+
+  + $Infl$: increase by 0.73 if moving from "low" to "medium", and by 1.61 if moving from "low" to "high" in the perceived degree of influence.
+
+  + $Type$: decreases by 0.68 if moving from "Apartment" to "Terrace", and increases by 0.74 if moving from "Apartment" to "Tower" based on the type of rental accommodation.
+
+  + $Cont$: increase by 0.48 if moving from "low" to "high" in that contact residents are afforded with other residents.
+
+The plots below highlight the effect of each predictor according to their change in factors. For instance, the is a small difference in medium and high satisfaction levels when the perceived degree of influence is low. Satisfaction is higher when the perceived degree of influence is high. 
+
+```{r fig.width=10, fig.height=4}
+p1 = plot(Effect("Infl", model), multiline = TRUE, axes=list(
+  x = list(Infl = list(lab = "")),
+  y = list(lab = "Satisfaction of Householders(probability)")),
+  main = "Perceived Degree of Influence")
+p2 = plot(Effect("Type", model), multiline = TRUE, axes=list(
+  x = list(Type = list(lab = "")),
+  y = list(lab = "")),
+  main = "Type of Rental Accommodation")
+p3 = plot(Effect("Cont", model), multiline = TRUE, axes=list(
+  x = list(Cont = list(lab = "")),
+  y = list(lab = "")),
+  main = "Level of Affording")
+gridExtra::grid.arrange(p1,p3,p2,nrow =1)
+```
+
+##### **Predictions**
+
+With the use of the model, predictions can be made defining the levels for the predictors. For example, let's assume the satisfaction of an `apartment` householder with their present housing circumstances is needed based on `low` perceived degree of influence householder have on the management of the property, and contact residents are afforded with other residents is `high`.
+
+```{r}
+predict(model, data.frame(Type = "Apartment", Infl = "Low", Cont = "High"))
+```
+
+As a result, the satisfaction of the householder with their present housing circumstances is expected to be 'low'. 
+
+##### **Works Cited**
+
+* Multinomial Logistic Regression. UCLA: Statistical Consulting Group. 
+from https://stats.idre.ucla.edu/r/dae/multinomial-logistic-regression/ (accessed October 12, 2020)
+
