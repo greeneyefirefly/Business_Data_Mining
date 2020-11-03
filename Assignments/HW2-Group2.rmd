@@ -1,12 +1,18 @@
 ---
 title: "DATA 621 - Business Analytics and Data Mining"
-author: Avraham Adler, Samantha Deokinanan, Amber Ferger, John Kellogg, Bryan Persaud,
-  Jeff Shamp
 date: "10/11/2020"
 output:
   pdf_document: default
 subtitle: 'Fall 2020 - Group 2 - Homework #2'
 ---
+
+AUTHORS:
+[Avraham Adler](https://github.com/aadler) 
+[Samantha Deokinanan](https://github.com/greeneyefirefly)
+[Amber Ferger](https://github.com/amberferger) 
+[John Kellogg](https://github.com/kelloggjohnd)
+[Bryan Persaud](https://github.com/bpersaud104)
+[Jeff Shamp](https://github.com/Shampjeff)
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=TRUE, error=FALSE, warning=FALSE, message=FALSE)
