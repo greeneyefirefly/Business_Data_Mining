@@ -1,0 +1,200 @@
+---
+output:
+  html_document:
+    toc_depth: 4
+---
+***
+
+<div align = "center">
+*Principal Component Analysis in R.*  
+________________________  
+Samantha Deokinanan  
+CUNY MSDS DATA 621 Blog #4  
+November 4th, 2020  
+</div>
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.height = 5, fig.width = 8, message = FALSE, warning = FALSE)
+```
+
+##### **Background**
+
+Sometimes you may have too many predictors. If you use them all in your regression model, they can cause problems, the model explanation can be difficult because of collinearity, and it can degrade prediction performance.
+
+Typically, multivariate regression is introduced when OLS fail because of high correlation among predictors (the solution will have high variability and be unstable), and # of predictors > observations (that isn’t solved when you remove the highly correlated ones).
+
+In Principal Component Analysis (PCA), we look for a few linear combinations of the predictive variables which can summarize the data without losing too much information. Here, components are independent, which helps with collinearity. Intuitively, this is a method of extracting information from higher dimensional data by projecting it to a lower dimension.
+
+So, a little refresher, a linear combination of a set of vectors is an expression of the type summation of the values times scalar weights. A standardized linear combination is said to be normalized or standardized if the sum of absolute values of the weights is 1. A set of vectors are said to be linearly independent if none of them can be written as a linear combination of any other vectors in the set, otherwise, it’s linearly dependent. Correlation is a statistical measure of linear dependence.
+
+##### **Statistical Method**
+
+PCA is based on EV decomposition of the variance-covariance or correlation matrix of the predictive variables. And each principal component is thus effectively a linear combination of the predictive variables where the eigenvectors (the weights) are obtained from the EV decomposition. 
+
+In term of linear algebra, singular value decomposition (SVD) algorithm breaks down a matrix X  of size $n \times p$ into three pieces, $X=U\Sigma V^T$, where U is the matrix with the eigenvectors of $XX^T$, $\Sigma$  is the diagonal matrix with the singular values and $V^T$ is the matrix with the eigenvectors of $X^TX$. 
+
+The algorithm is such that principal components successively capture the maximum of the variance of x, and there is no standardized linear combination which can capture maximum variance without being one of the PCs. The magnitude of the eigenvalues provides the measure of variance captured by the PCs and should select the first few components for a regression.
+
+##### **R Application**
+
+```{r}
+# R packages
+library(tidyverse)
+library(factoextra)
+```
+
+```{r}
+houses = read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/housing/housing.data", 
+                    header = F, na.string = "?")
+colnames(houses) = c("CRIME", "ZN", "INDUS","CHAS","NOX","RM","AGE","DIS","RAD","TAX","PT","B","LSTAT","MEDV")
+```
+
+Using data from a major city, Boston, we strove to identify trends and model crime rates and their effect on the housing conditions. The data set contains 506 records summarizing attributes of various neighborhoods in the city of Boston. 
+
+Predictor Variables|Description   
+-|----
+crime | neighborhood’s crime rate (coded '0' for < median and coded '1' for > median)
+zn | proportion of residential land zoned for large lots (over 25000 square feet) 
+indus | proportion of non-retail business acres per suburb  
+chas | a dummy var. for whether the suburb borders the Charles River (1) or not (0)
+nox | nitrogen oxides concentration (parts per 10 million) 
+rm | average number of rooms per dwelling   
+age | proportion of owner-occupied units built prior to 1940   
+dis | weighted mean of distances to five Boston employment centers  
+rad | index of accessibility to radial highways   
+tax | full-value property-tax rate per $10,000 
+pt | pupil-teacher ratio by town 
+lstat | lower status of the population (percent) 
+medv | median value of owner-occupied homes in $1000s 
+
+We can make some initial observations. The data set has complete cases, thus, there is no need for imputation. Moreover, based on the skewness, most of the data does not have a normal distribution. Thus, the transformation will be needed
+
+```{r}
+# Summary Statistics
+psych::describe(houses)[,-c(1,6,7)]
+```
+
+```{r fig.height=9}
+# Corrgram
+GGally::ggcorr(houses, label = TRUE) + labs(title = "Correlation of Variables")
+```
+
+We see that there are many variables which are moderately to highly correlated, $\left|\rho\right| > 0.50$. This could lead to multicollinearity and should be handled.
+  
+```{r}
+# compute variance of each variable
+apply(houses, 2, var)
+
+# create new data frame with centered variables
+scaled_df = apply(houses, 2, scale)
+head(scaled_df) %>% knitr::kable(digits = 3L)
+```
+
+R has several built-in functions that simplify performing PCA. By default, the `prcomp` function centers the variables to have mean zero and we can scale the variables to have a standard deviation one. It is based on the SVD algorithm.
+
+```{r}
+pca_result = prcomp(houses, scale = TRUE)
+```
+
+The output from `prcomp` comprises several useful measures. Some of the measures returned include the center and scale components correspond to the means and standard deviations of the variables that were used for scaling before performing PCA. Each column of the rotation matrix contains the corresponding principal component weights vector.
+
+```{r}
+# means
+pca_result$center
+
+# standard deviations
+pca_result$scale
+
+# rotation
+round(-pca_result$rotation,3)
+```
+
+From the results, we see that there are four distinguished principal components. This is expected because, in general, there are $min(n−1,p)$ informative principal components in a data set with n observations and p variables. On an important note, by default, eigenvectors in R point in the negative direction. We obtain the PCs scores from our results. However, we make a slight sign adjustment.
+
+```{r}
+pca_result$x = -pca_result$x
+head(pca_result$x) %>% knitr::kable(digits = 3L)
+```
+
+***
+
+**Visualization of Principal Components**
+
+To decide how many principal components should be maintained, it is common to summarize the results of a PCA by making a scree plot. A scree plot is a line plot of the eigenvalues of factors or principal components in an analysis. 
+
+```{r}
+#scree plot
+fviz_eig(pca_result)
+```
+
+The most noticeable change in slope in the scree plot occurs at component 3, where we see the "elbow" of the scree plot. PCA allowed us to reduce our 14 variables to 3 variables while still explaining 67.6% of the variability. This is a good improvement.
+
+Now we can plot the first two PCs using biplot, which includes both the position of each sample in terms of PC1 and PC2 and also will show you how the initial variables map onto this. A biplot is a type of plot that will allow you to visualize how the samples relate to one another in our PCA (which samples are similar and which are different) and will simultaneously reveal how each variable contributes to each PC.
+
+```{r}
+#biplot
+fviz_pca_biplot(pca_result, label = "var", col.var = "#2E9FDF", col.ind = "#696969")
+```
+
+***
+
+**Interpretation of Principal Components**
+
+The interpretation of principal components is still a profoundly studied topic in statistics. One method of interpretation is to calculate the correlation between the original data and the component, i.e. covariance matrix. The PCs can then be interpreted based on which variables are most correlated in either a positive or negative direction.
+
+```{r}
+cor(houses, pca_result$x[,1:5]) %>% knitr::kable(digits = 3L)
+```
+
+We see PC1 is positively correlated with nearly all the variables, except for `CHAS` (which we saw had no strong direction in the biplot). But with PC2, is among the most correlated variables, similarly for component 3. And so, the first three components are capable of explaining the variability of the data. It was found to explain 67.6% of the variability. With the use of PCA, we when from a model a data with four variables to one with only 3 variables.
+
+**Regression Model**
+
+Now we will solve the regression problem using PCA where we want to predict the median value of owner-occupied homes in $1000s, `MEDV`.
+
+```{r}
+# Fit model using all 14 vars
+houses.fullmodel = lm(MEDV ~ ., data = houses)
+summary(houses.fullmodel)
+
+# Fit model using the first 3 PCs
+houses.pcamodel = lm(houses$MEDV ~ pca_result$x[,1:3])
+summary(houses.pcamodel)
+```
+
+Comparing the full model to that of the PCA model, we see that PCA was capable of explaining nearly 83% of the variability with just three variables than the 12 significant variables from the full model which has $R^2$ = 0.73. 
+
+```{r echo=FALSE}
+# Compare observation vs prediction plots
+p1 = ggplot(houses, aes(x = MEDV, y = predict(houses.fullmodel))) +
+  geom_point(alpha = 0.5, color = "#2E9FDF") +
+  geom_smooth(method = lm , color = "#696969", se = FALSE) +
+  labs(x = "Observed", y = "Predicted", title = "Full Model") +
+  theme_bw()
+
+p2 = ggplot(houses, aes(x = MEDV, y = predict(houses.pcamodel))) +
+  geom_point(alpha = 0.5, color = "#2E9FDF") +
+  geom_smooth(method = lm , color = "#696969", se = FALSE) +
+  labs(x = "Observed", y = "Predicted", title = "PCA") +
+  theme_bw()
+
+gridExtra::grid.arrange(p1,p2, ncol = 2)
+```
+
+From the plots, we see that the fit for the PCA is much better than that of the full model as the points are closer to the 1:1 line, suggesting that we are predicting very close to the actual data. In conclusion, this is a simple illustration of how to perform PCA.
+
+##### **Notes**
+
+* Rank of a matrix denotes the maximum number of linearly independent rows or columns of a matrix.  A matrix with independent columns is referred to as a full column rank. With correlated multivariate data, the data matrix is thus not of full column rank.
+
+* PCA is a method to combine original predictive variables using weights (derived from EV decomposition), so that maximum variance or correlation of the original data gets captured.
+
+* PCA serves two purposes in regression analysis. It is used to convert a set of highly correlated variables to a set of independent variables by using linear transformations. Also, it is used for variable reductions. So, it converts a group of correlated predictive variables to a group of independent variables and it constructs a "strong" predictive variable from several "weaker" predictive variables.
+
+* PCA is performed without consideration of the target variable. So PCA is an unsupervised analysis.
+
+##### **Works Cited**
+
+* Agresti, A. (2015). Foundations of Linear and Generalized Linear Models. Wiley, Hoboken, New Jersey. 1st edition.
