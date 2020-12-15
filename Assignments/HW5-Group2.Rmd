@@ -1,0 +1,1199 @@
+---
+title: "DATA 621 - Business Analytics and Data Mining"
+subtitle: 'Fall 2020 - Group 2 - Homework #5'
+author: Avraham Adler, Samantha Deokinanan, Amber Ferger, John Kellogg,
+    Bryan Persaud, Jeff Shamp
+date: "11/28/2020"
+output:
+  pdf_document:
+    toc: TRUE
+    toc_depth: 4
+    extra_dependencies:
+      amsmath: null
+      inputenc: utf8
+urlcolor: purple
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, error=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r loadData, include=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(knitr)
+library(MASS)
+library(caret)
+library(corrplot)
+library(mice)
+library(pscl)
+library(mpath)
+library(data.table)
+
+# Set master seed
+set.seed(65408)
+
+# Set filepaths for data ingestion
+urlRemote  = "https://raw.githubusercontent.com/"
+pathGithub = "aadler/DT621_Fall2020_Group2/master/HW5/data/"
+fileTrain = "wine-training-data.csv"
+fileEval = "wine-evaluation-data.csv"
+
+# Read training file
+DT <- fread(paste0(urlRemote, pathGithub, fileTrain))
+
+# Number of training observations
+ntrnobs <- dim(DT)[[1]]
+
+# Get the names of the predictor variables
+nmtrn <- names(DT)[-(1:2)]
+nmtrnINT <- c('AcidIndex', 'LabelAppeal', 'STARS')
+nmtrnDUB <- setdiff(nmtrn, nmtrnINT)
+```
+
+# ASSIGNMENT
+The assignment for HW5 is to analyze and model a dataset containing
+approximately 12,000 records representing commercially available wines. The
+`TARGET` response variable represents the number of sample cases of wine
+purchased by wine distribution companies after sampling that wine. These cases
+would be used to provide tasting samples to restaurants and wine stores around
+the United States. The more sample cases purchased, the more likely is a wine to
+be sold at a high end restaurant. A large wine manufacturer is studying the data
+in order to predict the number of wine cases ordered based upon the wine
+characteristics. If the wine manufacturer can predict the number of cases, then
+that manufacturer will be able to adjust their wine offering to maximize sales.
+
+The objective of this assignment is to build a count regression model to predict
+the number of cases of wine that will be sold given certain properties of the
+wine. *HINT:* Sometimes, the fact that a variable is missing is actually
+predictive of the target. You can only use the variables given to you (or
+variables that you derive from the variables provided).
+
+# DATA EXPLORATION
+## Variables
+The data is composed of the following variables:
+
+|VARIABLE NAME|DEFINITION|THEORETICAL EFFECT|
+|--|----|---|
+|INDEX|Identification Variable (do not use)|None|
+|TARGET|Number of Cases Purchased|None|
+|AcidIndex|Proprietary method of testing total acidity of wine by using a weighted average||
+|Alcohol|Alcohol Content||
+|Chlorides|Chloride content of wine||
+|CitricAcid|Citric Acid Content||
+|Density|Density of Wine||
+|FixedAcidity|Fixed Acidity of Wine||
+|FreeSulfurDioxide|Sulfur Dioxide content of wine||
+|LabelAppeal|Marketing Score indicating the appeal of label design for consumers. High numbers suggest customers like the label design. Negative numbers suggest customers don't like the design.|Many consumers purchase based on the visual appeal of the wine label design. Higher numbers suggest better sales.|
+|ResidualSugar|Residual Sugar of wine||
+|STARS|Wine rating by a team of experts. 4 Stars = Excellent, 1 Star = Poor|A high number of stars suggests high sales|
+|Sulphates|Sulfate content of wine||
+|TotalSulfurDioxide|Total Sulfur Dioxide of Wine||
+|VolatileAcidity|Volatile Acid content of wine||
+|pH|pH of wine||
+
+There are `r ntrnobs` observations. All of these predictors are numeric, 
+although `LabelAppeal`, `AcidIndex` and `STARS` all appear to be ordinal factors
+and not true numerics. For the purpose of this assignment, we can treat them
+as integers.
+
+## Missing Data
+There are a lot of missing values for some of the predictors.
+
+```{r missingVal}
+missingPreds <- transpose(DT[, lapply(.SD, function(x) {sum(is.na(x))}),
+                             .SDcols = nmtrn],
+                          keep.names = 'Predictors')
+setnames(missingPreds, 'V1', 'Missing')
+missingPreds[, Percentage := Missing / ntrnobs * 100]
+setorder(missingPreds, -Missing)
+kable(missingPreds, digits = 2L, caption = 'Predictors with Missing Observations')
+```
+
+`STARS` is especially sparse, but as noted in the assignment, this may be an
+indication in and of its own. It is reasonable to assume that the vintners of a
+good wine want it to be rated. If they do not submit it for rating, that may be
+an indication of their lack of faith in the wine. How to factor this into the
+analysis will be decided individually by the modelers in this assignment. The
+other missing variables are all less than 10%, and their handling via imputation
+or otherwise will be done on a model-by-model basis as well.
+
+## Summary Statistics and Graphs
+As all of the data are numeric, we can investigate the distributions of the
+predictors both tabularly and graphically.
+
+The numeric predictor variables have the following summary statistics, ignoring
+missing values:
+
+```{r statsN}
+# Isolate numeric only predictors
+predictorDT <- DT[, .SD, .SDcols = nmtrn]
+
+# Melt them from wide to long format
+predictorDTM <- melt(predictorDT, variable.name = 'metric',
+                     value.name = 'value',  variable.factor = FALSE,
+                     measure.vars = nmtrn)
+
+# Calculate summary statistics
+statsN <- predictorDTM[, .(Mean = mean(value, na.rm = TRUE),
+                           SD = sd(value, na.rm = TRUE),
+                           Min = min(value, na.rm = TRUE),
+                           Q1 = quantile(value, prob = 0.25, na.rm = TRUE),
+                           Median = median(value, na.rm = TRUE),
+                           Q3 = quantile(value, prob = 0.75, na.rm = TRUE),
+                           Max = max(value, na.rm = TRUE),
+                           IQR = IQR(value, na.rm = TRUE)), keyby = 'metric']
+
+# Print the table
+kable(statsN, digits = 3L, align = 'r',
+      caption = "Summary Statistitics for Numeric Variables")
+```
+
+A kernel-smoothed density plot of the distributions of the non-integer numeric
+predictors is below, followed by a histogram of the integral-valued predictors.
+
+```{r graphsD, fig.height=5, fig.width=7}
+# Using Epanechnikov kernel to generate kernel-smoothed densities
+ggplot(predictorDTM[!is.na(metric) & metric %chin% nmtrnDUB], aes(x = value)) +
+  geom_density(kernel = 'epanechnikov') +
+  facet_wrap( ~ metric, scales = 'free') +
+  ggtitle('Kernel-smoothed Density of Numeric Predictors')
+```
+
+The numeric predictors all look to be basically symmetrical, but non-Gaussian in
+that there is a strong spike near the median, but the tails on either side are
+thicker than would be for a normal distribution with that low of a standard
+deviation. This is also why a boxplot would be a poor graphical indicator, as
+the spike at the medians would lead to a compressed inter-quartile range and a
+plethora of outliers.
+
+```{r graphsH, fig.height=2, fig.width=7}
+# Freedman-Diaconis rule for bin widths
+FDbin <- function(x) {
+  result <- 2 * IQR(x, na.rm = TRUE) / (length(x) ^ (1 / 3))
+  return(ifelse(result == 0, 0.5, result))
+}
+# Generate histogram
+ggplot(predictorDTM[!is.na(metric) & metric %chin% nmtrnINT], aes(x = value)) +
+  geom_histogram(binwidth = FDbin, fill = 'indianred4') +
+  facet_wrap( ~ metric, scales = 'free') +
+  ggtitle('Histogram of Integral Predictors')
+```
+
+Of these three, `LabelAppeal` seems to be the most "normal" of the lot; `STARS`
+and `AcidIndex` look to be more Poisson in shape.
+
+## Correlations
+The corrgram below graphically represents the correlations between the numeric
+predictor variables, when ignoring the missing variables.
+
+```{r corrgram, fig.width=5, fig.height=6.5}
+# Create corrgram
+corrplot::corrplot(cor(DT[, ..nmtrn], use = 'complete.obs'),
+         method = 'ellipse', type = 'lower', order = 'hclust',
+         hclust.method = 'ward.D2')
+```
+
+There is very little correlation between the variables. The only pairs with some
+level correlation are:
+
+  * `STARS` being positively correlated with `LabelAppeal`
+    * This is interesting. Could it be that wine connoisseurs are impacted by
+    the visual appearance of the label and not just the flavor?
+  * `AcidIndex` having some positive correlation with `FixedAcidity`
+    * One may have suspected a higher correlation, to be frank.
+  * `AcidIndex` having some *negative* correlation with `STARS`
+    * Wine reviewers may not like too much acidity, it seems.
+    
+## TARGET variable
+Lastly, the complete dataset exhibits an average of
+`r prettyNum(mean(DT$TARGET), digits = 3L)` cases being bought, with the
+distribution below:
+
+```{r targetH, fig.height=2, fig.width=3, fig.align='center'}
+# Plot distribution of TARGET
+ggplot(DT[, .(TARGET)], aes(x = TARGET)) +
+  geom_histogram(binwidth = FDbin, fill = 'darkolivegreen4')
+```
+    
+# DATA PREPARATION
+First, preparation necessary for all the models equally will be performed. The
+subsequent imputation and feature generation, if necessary will be discussed in
+a separate subsection for each modeler.
+
+## Training & Testing Split
+All the models will be trained on the same approximately 70% of the training
+set, reserving 30% for validation of which model to select for the count
+estimation on the supplied evaluation set.
+
+```{r trainTestSplit}
+# Create training and testing split
+set.seed(1004)
+trnIDX <- createDataPartition(DT$TARGET, p = 0.7)
+trnSet <- DT[trnIDX$Resample1, ]
+tstSet <- DT[!trnIDX$Resample1, ]
+```
+
+## Poisson Model #1 & Negative Binomial Model #1
+### Missing Data
+The missing data can be split into two groups: `STARS` and the rest. For all the
+others, I do not think there is signal encoded in the "missingness" and thus
+will use some form of imputation. `STARS` is different as discussed in the DATA
+EXPLORATION section. Therefore, I will create a new feature called `Rated` which
+will be true if `STARS` is missing, and then only use this variable and its
+interaction with `STARS` in the model, and not `STARS` by itself. 
+
+```{r model1addVars}
+# P1 & NB1: Copy the training set to leave a pristine version for others
+m1trn <- copy(trnSet)
+
+# P1 & NB1: Add the "rated" factor variable
+m1trn[, Rated := factor(ifelse(is.na(STARS), 'Unrated', 'Rated'),
+                        levels = c('Unrated', 'Rated'),
+                        labels = c('Unrated', 'Rated'))]
+```
+
+### Imputation
+Imputation will be handled through bagging. Instead of looking at a nearest
+neighbors approach, which also requires centering and scaling, once can create a
+set of bagged trees. As per Kuhn (2019):
+
+>*For each predictor in the data, a bagged tree is created using all of the*
+*other predictors in the training set. When a new sample has a missing*
+*predictor value, the bagged model is used to predict the value. While, in*
+*theory, this is a more powerful method of imputing, the computational costs*
+*are much higher than the nearest neighbor technique.*
+
+The bagged trees will use `STARS` as a predictor, as that contains valuable
+information, but prior to the imputation, the missing `STARS` values will be
+replaced by 0 so as not to be imputed, as per the explanation above. The
+preprocessing will also check for near-zero value predictors.
+
+```{r model1impute}
+# P1 & NB1: Create bagged-tree imputation model
+set.seed(89)
+m1trnI <- preProcess(m1trn, method =c('nzv', 'bagImpute'))
+
+# P1 & NB1: Replace missing STARS with 0s
+m1trn[is.na(STARS), STARS := 0L]
+
+# P1 & NB1: Impute the remaining NAs
+m1trnImp <- predict(m1trnI, newdata = m1trn)
+```
+
+It will be instructive to compare the shapes of the distributions after
+imputation to those before imputation.
+
+```{r m1postImputeD, fig.height=5, fig.width=7}
+# P1 & NB1: Isolate numeric only predictors
+m1predictorDT <- m1trnImp[, .SD, .SDcols = nmtrn]
+
+# P1 & NB1: Melt them from wide to long format
+m1predictorDTM <- melt(m1predictorDT, variable.name = 'metric',
+                     value.name = 'value',  variable.factor = FALSE,
+                     measure.vars = nmtrn)
+
+# P1 & NB1: Using Epanechnikov kernel to generate kernel-smoothed densities
+ggplot(predictorDTM[metric %chin% nmtrnDUB], aes(x = value)) +
+  geom_density(kernel = 'epanechnikov') +
+  facet_wrap( ~ metric, scales = 'free') +
+  ggtitle('Kernel-smoothed Density of Numeric Predictors')
+```
+
+Thankfully, none of the shapes appears to have changed significantly, which
+implies the imputation was in line with the original distributions. Now for the
+histograms.
+
+```{r m1postImputeH, fig.height=2, fig.width=7}
+# P1 & NB1: Generate histogram
+ggplot(m1predictorDTM[metric %chin% nmtrnINT], aes(x = value)) +
+  geom_histogram(binwidth = FDbin, fill = 'indianred4') +
+  facet_wrap( ~ metric, scales = 'free') +
+  ggtitle('Histogram of Integral Predictors')
+```
+
+Here too, `AcidIndex` and `LabelAppeal` look very similar to their
+pre-imputation distribution. What stands out is `STARS`. Both the Poisson and
+the negative binomial models are either unimodal or have to consecutive values
+sharing the mode, due to their inherent nature as discrete distributions. What
+is seen here is that 1 star is empirically less common than 0 (unrated) or 2
+stars. On the one hand, this could simply be noise (process variance) or
+parameter error (finite sample size). On the other, it could indicate the need
+for a zero-inflated version of the counting distributions.
+
+## Poisson Model #2 & Multiple Linear Regression Model #1
+
+The right balance of the chemical properties of the wine is essential to make it
+taste, look, and smell delightful, in addition to having a long shelf-life.
+Typically, citric acid and alcohol are the main positive attributes a wine
+should have, while volatile acidity and sulfates are the main negative ones. 
+However, the dataset has negative values instead of near-zero in some of these 
+variables describing the chemical properties of the wine. Because little
+information is given whether or not these variables were normalized, absolute
+values will be taken assuming there was an error made during data collection. 
+
+Lastly, to handle missing data for `STARS`, they will be replaced by 0, while 
+the chemical properties will be imputed. Because the predictive mean matching 
+imputation method combines the standard linear regression and the
+nearest-neighbor imputation approach, Model Set #2 elected to fill in the
+missing values of a continuous variable by using mean-matching imputation.
+Afterward, the data is pre-processed to fulfill the assumption of normality
+using the Yeo-Johnson transformation (2000). This technique attempts to find the
+value of lambda that minimizes the Kullback-Leibler distance between the normal
+distribution and the transformed distribution. This method has the advantage of
+working without having to worry about the domain of \(x\).
+
+```{r m2clean}
+# P2 & ML 1: Clean and impute
+set.seed(525)
+m2train <- copy(trnSet[,-1])
+m2train[,c(2:8,11:12)] <- abs(m2train[,c(2:8,11:12)])
+m2train$STARS[is.na(m2train$STARS)] <- 0
+m2train.impute <- mice(m2train, method = 'pmm', print = FALSE)
+m2train <- complete(m2train.impute)
+m2train.r <- m2train$TARGET
+m2train.p <- m2train[,-1]
+pre.process <- preProcess(m2train.p, method = c("YeoJohnson"))
+m2train.p <- predict(pre.process, m2train.p)
+m2train[,c(2:13,15)] <- m2train.p[,c(1:12,14)]
+```
+
+## Multiple Linear Regression #2 & Negative Binomial Model #2
+### Missing Data
+These models will deal with missing numerical data by imputing the NA's
+using the Multivariate imputation by chained equations (MICE) method. Multiple
+imputation involves creating multiple predictions for each missing value, helping 
+to account for the uncertainty in the individual imputations. 
+
+```{r model3impute}
+# ML2 & NB2 data transformation
+# MICE imputation on train and test set
+set.seed(123)
+m3train <- complete(mice(data = trnSet[, -c('INDEX')],
+                         method = "pmm", print = FALSE), 3)
+m3test <- complete(mice(data = tstSet[, -c('INDEX')],
+                         method = "pmm", print = FALSE), 3)
+```
+
+# BUILD MODELS
+## Poisson Model #1 & Negative Binomial Model #1
+The same person is building these two models, and the model setups will be
+similar. Each model will follow a similar format, with only the family changing.
+Each will start with the saturated model including all the individual predictors
+***except*** for `STARS`. There will also be the following interactions:
+
+  * `Rated` and `STARS`
+    * As discussed above, by having `Rating` on its own and this interaction
+    the effect of both having a rating and the effect of the rating level can be
+    measured, without penalizing unrated wines a second time for a 0.
+  * The full four-way interaction between `AcidIndex`, `FixedAcidity`,
+  `VolatileAcidity`, and `pH`
+    * There are **four** separate predictors relating to acidity. Despite their
+    Pearson product-moment correlations being low, I am suspicious of too much
+    weight being given to acidity. By including their interactions, effects can
+    be tempered, or magnified, as necessary. `CitricAcid` is not included here
+    as is not merely an acid but a flavor provider as well. Also, five-way
+    interactions lead to migraines.
+  * `FreeSulfurDioxide` and `TotalSulfurDioxide`
+    * Again, a case of multiple theoretically related predictors.
+  * `LabelAppeal` with `Rated` and `LabelAppeal` with `Rated:STARS`
+    * This is a later addition. The top three predictors in magnitude were
+    `LabelAppeal`, `Rated`, and `Rated:STARS`. With all three being so strong,
+    there may be interactions between them. However, as `STARS` alone has been
+    removed from contention, only the interactions between the two others will
+    be considered.
+
+### Poisson Model # 1
+For the Poisson model, a forward and backwards stepwise procedure based on AIC
+will be used, and the model with the lowest AIC on the training set will be the
+selected to be tested against the testing set. Using stepAIC precludes the use
+of k-fold cross validation.
+
+```{r m1PTrain}
+# P1: Using stepAIC so turn off cross-validation
+trc <- trainControl(method = 'none')
+set.seed(350047)
+m1PFit <- train(TARGET ~ . + FreeSulfurDioxide:TotalSulfurDioxide +
+                  AcidIndex * FixedAcidity * VolatileAcidity * pH +
+                  Rated:STARS + LabelAppeal:Rated + LabelAppeal:Rated:STARS -
+                  INDEX - STARS, data = m1trnImp,
+                trControl = trc, method = 'glmStepAIC',
+                family = poisson(link = 'log'), direction = 'both', trace = 0)
+# P1: Save AIC
+m1PFitAIC <- AIC(m1PFit$finalModel)
+```
+
+\small
+```{r m1PTable}
+# P1:Print results. This needed to be in its own section so that the LaTeX
+# commands to change the text size can be wrapped around it.
+kable(summary(m1PFit$finalModel)$coefficients,
+      caption = "Model 1 Poisson Regression Output")
+```
+\normalsize
+
+#### Model Checking
+
+```{r m1PFitCheck}
+# P1: Check the dispersion of the model
+m1PFitDisp <- sum(residuals(m1PFit$finalModel, type = 'pearson') ^ 2) /
+  m1PFit$finalModel$df.residual
+```
+
+A Poisson model should have a dispersion parameter close to 1, as the Poisson by
+definition has its mean and variance equal. This model has a dispersion
+parameter of `r prettyNum(m1PFitDisp, digits = 3L)` which is deemed acceptable.
+
+#### Coefficient Discussion
+Similar to the master data set, the training data set has an empirical mean
+purchased cases of `r prettyNum(mean(m1trnImp$TARGET), digits = 3L)`. Having no
+other information, the Poisson model expects about
+`r prettyNum(exp(m1PFit$finalModel$coefficients[[1]]), digits = 3L)` cases, due
+to the intercept value of `r m1PFit$finalModel$coefficients[[1]]`. This means
+that the model identifies factors which lean more to *increasing* purchases than
+to decreasing purchases.
+
+The absolute magnitude of the coefficients makes sense. Factors related to
+acidity tend to lower the number of cases bought. The factors with the greatest
+magnitude effect are all positive, and they are the fact of being rated, and the
+interactions between that and the rating level and label appeal. Keeping
+everything else equal, merely being rated increases the number of cases by about
+\(e^{0.6677926} \approx  1.95\)! Each additional star is predicted to contribute
+another 1.2 cases to the total purchase. Interestingly, `LabelAppeal` has fallen
+out of the model; its contributions are through its interactions. As surmised,
+looking at all three individually may have proven too strong, as the three-way
+interaction coefficient tempers the others.
+
+All the coefficients are significant at at least the 5% level except for
+Sulphates, but in terms of AIC, leaving it in provided a better model than did
+taking it out.
+
+#### Variable Importance
+
+```{r m1PvarImp}
+# P1: Extract the Poisson variable importance and order it for display
+vIP <- varImp(m1PFit$finalModel)
+vIPn <- row.names(vIP)
+vIPDT <- data.table(Coefficients = vIPn, vIP)
+setorder(vIPDT, -Overall)
+kable(vIPDT, digits = 2L, caption = "Poisson Model Variable Importance")
+```
+
+The variable importance can also be seen from the trace of the step AIC
+procedure. The further down the list below a variable preceded by a `-` is, the
+more important it is, as its removal would cause a greater disruption to the
+deviance and the AIC. The three rating variables, being rated, the rating level,
+and the label appeal, are the most important variables when it comes to future
+case purchases.
+
+It is also interesting to note that there are a number of variables whose
+inclusion as predictors would result in a lower deviance model than the
+selected, but said drop in deviance was not enough to offset the possible
+parameter error. These include `VolatileAcidity`, `LabelAppeal`, `pH`,
+`Density`, `ResidualSugar`, `VolatileAcidity:pH`, and `CitricAcid`.
+
+```
+                                              Df Deviance   AIC
+<none>                                             9550.7 31902
++ VolatileAcidity                              1   9549.4 31903
+- Sulphates                                    1   9553.5 31903
+- `FreeSulfurDioxide:TotalSulfurDioxide`       1   9553.7 31903
++ LabelAppeal                                  1   9549.9 31903
++ pH                                           1   9550.3 31904
++ Density                                      1   9550.4 31904
++ ResidualSugar                                1   9550.4 31904
++ `VolatileAcidity:pH`                         1   9550.5 31904
++ CitricAcid                                   1   9550.6 31904
+- FixedAcidity                                 1   9554.6 31904
++ `FixedAcidity:pH:AcidIndex`                  1   9550.7 31904
++ `FixedAcidity:VolatileAcidity`               1   9550.7 31904
++ `FixedAcidity:pH`                            1   9550.7 31904
++ `FixedAcidity:VolatileAcidity:pH`            1   9550.7 31904
++ `VolatileAcidity:pH:AcidIndex`               1   9550.7 31904
++ `FixedAcidity:VolatileAcidity:AcidIndex`     1   9550.7 31904
++ `FixedAcidity:VolatileAcidity:pH:AcidIndex`  1   9550.7 31904
+- `FixedAcidity:AcidIndex`                     1   9554.9 31904
+- Alcohol                                      1   9555.1 31904
+- Chlorides                                    1   9555.2 31904
+- `pH:AcidIndex`                               1   9555.4 31905
+- FreeSulfurDioxide                            1   9558.6 31908
+- `LabelAppeal:STARS:RatedRated`               1   9565.2 31914
+- TotalSulfurDioxide                           1   9568.7 31918
+- `VolatileAcidity:AcidIndex`                  1   9569.6 31919
+- AcidIndex                                    1   9585.3 31935
+- `LabelAppeal:RatedRated`                     1   9719.7 32069
+- `STARS:RatedRated`                           1  10152.1 32501
+- RatedRated                                   1  10247.3 32597
+```
+
+### Negative Binomial Model # 1
+As the dispersion from the Poisson model was less than 1, at first blush, it is
+not expected that the negative binomial model will outperform the Poisson.
+
+```{r m1NBTrain}
+# NB1: There is no built-in AIC stepping in caret, so using basic glm.nb and
+# then calling stepAIC on saturated model. Once done, investigated some one-off
+# possible enhancements due to issues with glm.nb
+# See https://stackoverflow.com/questions/11749977/why-does-glm-nb-throw-a-missing-value-error-only-on-very-specific-inputs
+# For speed, only final called model is evaluated.
+set.seed(872)
+m1NBFitStart <- glm.nb(TARGET ~ . + FreeSulfurDioxide:TotalSulfurDioxide +
+                         AcidIndex * FixedAcidity * VolatileAcidity * pH +
+                         Rated:STARS + LabelAppeal:Rated +
+                         LabelAppeal:Rated:STARS - INDEX - STARS,
+                       data = m1trnImp, link = log)
+m1NBFitStep <- stepAIC(m1NBFitStart, direction = 'both', trace = 0)
+
+# Last call from automated procedure
+# TARGET ~ FixedAcidity + VolatileAcidity + Chlorides + FreeSulfurDioxide + 
+#     TotalSulfurDioxide + pH + Sulphates + Alcohol + LabelAppeal + 
+#     AcidIndex + Rated + FreeSulfurDioxide:TotalSulfurDioxide + 
+#     FixedAcidity:AcidIndex + VolatileAcidity:AcidIndex + Rated:STARS + 
+#     LabelAppeal:Rated + LabelAppeal:Rated:STARS
+
+# Removing VolatileAcidity improved the AIC
+
+m1NBFit <- glm.nb(formula = TARGET ~ FixedAcidity + Chlorides +
+                    FreeSulfurDioxide + TotalSulfurDioxide + pH + Sulphates +
+                    Alcohol + LabelAppeal + AcidIndex + Rated +
+                    FreeSulfurDioxide:TotalSulfurDioxide +
+                    FixedAcidity:AcidIndex + VolatileAcidity:AcidIndex +
+                    Rated:STARS + LabelAppeal:Rated + LabelAppeal:Rated:STARS,
+                  data = m1trnImp, link = log)
+
+# NB1: Save AIC
+m1NBFitAIC <- AIC(m1NBFit)
+```
+
+\small
+```{r m1NBTable}
+# NB1: Print results. This needed to be in its own section so that the LaTeX
+# commands to change the text size can be wrapped around it.
+kable(summary(m1NBFit)$coefficients,
+      caption = "Model 1 Negative Binomial Regression Output")
+```
+\normalsize
+
+#### Coefficient Discussion
+Similar to the Poisson model, having no other information, the negative binomial
+model expects about `r prettyNum(exp(m1NBFit$coefficients[[1]]), digits = 3L)`
+cases, due to the intercept value of `r m1NBFit$coefficients[[1]]`. This means
+that this model as well identifies factors which lean more to *increasing*
+purchases than to decreasing purchases.
+
+The absolute magnitude of the coefficients makes less sense in this model than
+in the Poisson. The factors related to appeal do increase the number of cases
+bought. However, the factors related to acidity tend to show more back-and-forth
+interactions than in the Poisson model.
+
+Also, there are more "insignificant" coefficients in this model, but these are
+all variables for which the AIC would increase should they have been removed.
+
+#### Variable Importance
+
+```{r m1NBvarImp}
+# NB1: Extract the NegBinom variable importance and order it for display
+vINB <- varImp(m1NBFit)
+vINBn <- row.names(vINB)
+vINBDT <- data.table(Coefficients = vINBn, vINB)
+setorder(vINBDT, -Overall)
+kable(vINBDT, digits = 2L,
+      caption = "Negative Binomial Model Variable Importance")
+```
+
+The trace of the step procedure is less complete when using the `glm.nb`
+function in `R` and is not listed here.
+
+Lastly, the deviance for the negative binomial model is actually lower than that
+for the Poisson model, but its AIC is higher. Based on AIC only, the Poisson
+model's parsimony beats out the negative binomial's explanatory powers.
+
+```{r m1PNB}
+# P1 & NB1: GoF Comparison
+m1PNBC <- data.table(Model = c("Poisson 1", "Negative Binomial 1"),
+                     Deviance = c(m1PFit$finalModel$deviance,
+                                  m1NBFit$deviance),
+                     AIC = c(m1PFit$finalModel$aic,
+                             m1NBFit$aic))
+kable(m1PNBC, digits = 3L,
+      caption = "Poisson 1 and NegBinom 1 Goodness-of-Fit Comparison")
+```
+
+## Poisson Model #2 & Multiple Linear Regression Model #1
+The `TARGET` variable has 2734 observations with zero values. This could be a
+result of the manufacturer not releasing the wine into the market, or that there
+were no orders placed. Therefore, backward stepwise variable elimination for a
+zero-inflated Poisson (ZIP) analysis will be investigated to understand the
+conditions. This model is further compared to the same Poisson model to
+determine whether there is an improvement.
+
+In the ZIP model, the independent variable, \(TARGET_i\), take zero values
+\(TARGET_i \sim 0\) with the probability \(\omega_i\) or values from Poisson
+distribution \(TARGET_i \sim \mathrm{Pois}(\lambda_i)\) with probability
+\((1 - \omega_i)\). For \(i = 1,\ldots, n\), it can be written as:
+
+\[
+P(Y_i = y_i) = 
+\begin{cases}
+\omega_i + (1-\omega_i)e^{-\lambda_i})&\text{ if } y_i = 0\\
+(1-\omega_i)\frac{e^{-\lambda_i}\lambda_i^{y_i}}{y_i!}&\text{ if } y_i > 0
+\end{cases}
+\]
+
+Therefore, the zero-inflated Poisson model have two parameters, \(\lambda_i\)
+and \(\omega_i\), and linked with the predictor variables with the following:
+
+\[
+\begin{aligned}
+&\log\left(\frac{\omega_i}{1-\omega_i}\right) = \sum_{j=1}^{t}\gamma_{ji}Z_{ji}\\
+&\log\left(\lambda_i\right) = \sum_{j=1}^{k}\beta_{ji}X_{ji}
+\end{aligned}
+\]
+
+where \(Z_1,\ldots, Z_l\) are the dependent variables for the first equation and 
+\(X_1,\ldots, X_k\) for the second one. The expected value and variance of the
+number of cases purchased for the \(i^{\textrm{th}}\) wine in the ZIP model are
+respectively:
+
+\[
+\begin{aligned}
+\mathrm{E}(Y_i) &= \lambda_i(1 - \omega_i)\\
+\mathrm{Var}(Y_i) &= (1 - \omega_i)(\lambda_i - \omega_i\lambda_i^2)
+\end{aligned}
+\]
+
+Similar to Poisson regression, the ZIP model assumes that the average number of 
+cases purchased equals the variance. For more information, refer to 
+[Zero-Inflated Poisson Regression](https://math.usu.edu/jrstevens/biostat/projects2013/rep_ZIP.pdf).
+
+### Poisson Model #2
+
+```{r m2poisson}
+set.seed(525)
+# Zero Inflated Poisson Model
+m2.pmodel <- zeroinfl(TARGET~., 
+                      dist = 'poisson', 
+                      model = TRUE, 
+                      data = m2train,
+                      link = "logit")
+# Backward Elimination
+m2.fpmodel <- be.zeroinfl(m2.pmodel, 
+                          data = m2train, 
+                          dist = 'poisson', 
+                          alpha = 0.05, 
+                          trace = FALSE)
+m2.poisson.aic <- AIC(m2.fpmodel)
+```
+
+Zero-inflated count models are two-component mixture models combining a point 
+mass at zero with a proper count distribution. Thus, there are two sources of 
+zeros: zeros may come from both the point mass and from the count component.
+
+\small
+```{r m2PTable}
+# P2: Outputs
+kable(summary(m2.fpmodel)$coefficients$count,
+      caption = "Zero Inflated Poisson Model #2 Count Output")
+kable(summary(m2.fpmodel)$coefficients$zero,
+      caption = "Zero Inflated Poisson Model #2 Zero Output")
+```
+\normalsize
+
+#### Model Checking
+
+```{r m2PFitCheck}
+# Dispersion statistic
+E2 <- resid(m2.fpmodel, type = "pearson")
+N  <- nrow(m2train)
+p  <- length(coef(m2.fpmodel))  
+dp <- sum(E2^2) / (N - p)
+
+# Poisson Model #2, same formula from ZIP model
+m2.poisson <- glm(TARGET ~ Alcohol + LabelAppeal + AcidIndex + STARS | VolatileAcidity + 
+                    CitricAcid + FreeSulfurDioxide + TotalSulfurDioxide + pH + 
+                    Sulphates + Alcohol + LabelAppeal + AcidIndex + STARS, 
+                  family = poisson(link = 'log'), data = m2train)
+vuong(m2.poisson, m2.fpmodel)
+```
+
+This model has a dispersion parameter of `r prettyNum(dp, digits = 3L)` which 
+suggests under-dispersion (i.e., variance < mean). This parameter indicates how 
+many times larger the variance is than the mean. Since the dispersion was less 
+than one, the conditional variance is smaller than the conditional mean. Models 
+that ignore under-dispersion will be overly conservative and may fail to detect 
+significant patterns. Generalized Poisson (GP) and Conway‐Maxwell‐Poisson (CMP)
+distributions are better choices for such modeling because they can handle both 
+over-dispersion and under-dispersion. But for the scope of this assignment, 
+it's apparent, from the Vuong test with the same Poisson model and the ZIP
+model, that the zero-inflated Poisson model is a slight improvement over the
+Poisson model. Therefore, the ZIP model will still be considered among others.
+
+#### Coefficient Discussion
+All of the predictors in both the count and inflation portions of the model are 
+statistically significant. This model fits the data significantly better than
+the null model, i.e., the intercept-only model. The count model contains
+information about variables that the parent Poisson model used to estimate
+`TARGET` on the condition that `TARGET` > 0. The coefficients for all 4
+regression variables are statistically significant at a 99% confidence level.
+The coefficient for `AcidIndex` is negative, meaning that as the total acidity
+of wine goes up by a unit, the number of purchased cases goes down by 2%. One
+the other hand, for the other variables, i.e. `Alcohol`, `LabelAppeal` and
+`STARS`, as these increase, the number of purchased cases will also increase. In
+particular, `LabelAppeal` can account for a 26% increase in the number of wine
+cases sold if the visual appeal of the wine scores increase by one unit and all
+other variables held constant. Whereas, there is a 19% increase in cases sold
+for each increase in the wine rating by a team of experts, `STARS`.
+
+The zero model contains information about variables that the nested Logistic 
+Regression model has been used to estimate the probability of whether or not
+cases are purchased. Examining the variables with a negative regression
+coefficient, this suggests that as the factor for the specific chemical
+properties increases, the probability of no case being purchase decreases. This
+is in line with our intuition, particularly for the sulfur dioxide levels. When
+a wine has an unusually small percentage of the Free and Total \(SO_2\), this
+suggests the wine is chemically and/or microbially unstable. Thus, if a wine
+manufacturer were to increase the sulfur dioxide levels by one unit, the odds
+that the wine would certainly not be purchased would decrease by a factor of
+0.92 to 0.95. However, `LabelAppeal` is among the positive coefficients for the
+zero model. This is interpreted as the higher a rating is for a bottle of wine,
+the more likely there will be no case purchase, and it doesn't seem reasonable.
+
+### Multiple Linear Regrssion Model #1
+Multiple Linear Regression Model #1 will be using the step function has an
+option to use a process that both adds and removes variables in the model. It
+uses AIC (Akaike information criterion) as a selection criterion. A full model
+and a null are defined, and then the function will follow a procedure to find
+the model with the lowest AIC. 
+
+```{r m1MLRFit}
+# Multiple Linear Regression model 
+set.seed(525)
+model.null = lm(TARGET ~ 1, data = m2train)
+model.full = lm(TARGET ~ ., data = m2train)
+
+# Step model used to derive final model, m1MLRFit  
+# step(model.null,
+#      scope = list(upper = model.full),
+#      direction = "both",
+#      data = m2train, 
+#      trace = FALSE)
+
+m1MLRFit = lm(TARGET ~ STARS + LabelAppeal + AcidIndex + TotalSulfurDioxide +
+                VolatileAcidity + FreeSulfurDioxide + Alcohol + CitricAcid + 
+                Chlorides + pH + Sulphates,
+              data = m2train)
+```
+
+\small
+```{r m1MLRTable}
+# ML1: Outputs
+kable(summary(m1MLRFit)$coefficient,
+      caption = "Multiple Linear Regression Model #1 Output")
+```
+\normalsize
+
+#### Coefficient Discussion
+Contributing coefficients are those which lie within the 95% level of
+significance. A positive coefficient indicates that as the value of the
+predictor increases, the response variable also tends to increase. A negative
+coefficient suggests that as the predictor increases, the response variable
+tends to decrease.
+
+The intercept itself suggests that with no other information about the wine,
+there will be cases sold. The other positive predictors suggest that increasing
+`STARS` and `LabelAppeal` will result in an increase in the number of case
+purchased. These make sense intuitively. Moreover, as discussed in the Poisson
+Model #2, the right balance of $SO_2$ lead to better wine, thus the coefficients
+are rather small and have a smaller effect when it is increased. This reasoning
+is similar for `Alcohol` levels. Next, `CitricAcid`, commonly used as an acid
+supplement during fermentation, helps winemakers boost the acidity of their wine
+and stabilize ferric haze. So, it makes sense that the higher `CitricAcid` is,
+the more cases would be sold. But once again, these need to be balance right.
+
+On the contrary, an increase in a unit of volatile acidity results in the
+decrease of case purchases. Volatile acidity is caused by bacteria or certain
+yeasts. This also can increase the acid index and pH if it is high. This is why
+sulfur dioxide is used to carefully control it. In all, this model should not be
+taken as fixed, when it comes to chemical processes, the wine manufacturer needs
+to take care of what to increase and decrease in order to reach equilibrium.
+
+## Negative Binomial Model #2 & Multiple Linear Regrssion Model #2
+### Negative Binomial Model #2
+#### Baseline Model 
+We will start with a simple negative binomial regression model to serve as a 
+baseline. This includes all variables in the dataset.
+
+```{r m2NBTrainBase}
+# NB2: Baseline Model
+m2NBBase <- glm.nb(TARGET ~ ., data = m3train)
+knitr::kable(summary(m2NBBase)$coefficients, digits = 3L,
+             caption = 'Negative Binomial Regression Model #2 - Base Output')
+```
+
+Immediately, we can see a few variables that do not meet the 0.05 p-value
+threshold. 
+
+#### Enhanced Model
+Backwards stepwise regression is performed and the result is a model with the 
+following variables *removed*: `FixedAcidity`, `CitricAcid`, `ResidualSugar`, 
+and `Density`. Because the `Sulphates` variable is very close to the 0.05
+p-value threshold of significance, we will remove it as well. 
+
+```{r m2NBTrain}
+# NB2: Revised Model
+m2NBFit <- glm.nb(TARGET ~ VolatileAcidity + Chlorides +
+                FreeSulfurDioxide + TotalSulfurDioxide + pH + Alcohol + 
+                LabelAppeal + AcidIndex + STARS, data = m3train)
+knitr::kable(summary(m2NBFit)$coefficients, digits = 3L,
+             caption = 'Negative Binomial Regression Model #2 - Final Output')
+```
+
+#### Coefficient Discussion
+The intercept of the final model tells us that there is typically ~1 case of
+wine purchased. Some things to note: 
+
+  * Stars and label appeal contribute the most positively to the number of cases
+  of wine purchased. Intuitively, this makes sense - the higher the rating and
+  the prettier the bottle, the more cases we would expect to be sold.
+  * Free Sulfur Dioxide and Total Sulfur Dioxide have a very tiny effect on the
+  number of cases sold (rounded to 3 decimal places, the impact is 0!)
+  * All of the remaining variables except alcohol have a negative effect on the
+  number of cases purchased. 
+
+### Multiple Linear Regrssion Model # 2
+One drawback to traditional multiple linear regression models is that the 
+forecast counts are not integers. We will deal with this by rounding the
+predictions to the nearest whole number. 
+
+#### Baseline Model
+We will start with a simple linear model to serve as a baseline. This includes
+all variables in the dataset. 
+
+```{r m2MLTrainBase}
+# ML2: Baseline model
+m2MLBase <- lm(TARGET ~ ., data = m3train)
+knitr::kable(summary(m2MLBase)$coefficients, digits = 3L,
+             caption = 'Multiple Regression Model #2 - Base Output')
+```
+
+Most of the variables in the dataset are significant, but we can immediately see
+a few that are above the 0.05 p-value threshold. 
+
+#### Enhanced Model
+Backwards stepwise regression is performed and the result is a model with the 
+following variables *removed*: `FixedAcidity`, `CitricAcid`, `ResidualSugar`, 
+and `Density`. 
+
+```{r m2MLTrain}
+# ML2: Enhanced model
+m2MLFit <- lm(TARGET ~ VolatileAcidity + Chlorides + FreeSulfurDioxide 
+              + TotalSulfurDioxide + pH + Sulphates + Alcohol + LabelAppeal 
+              + AcidIndex + STARS, data = m3train)
+knitr::kable(summary(m2MLFit)$coefficients, digits = 3L,
+             caption = 'Multiple Regression Model #2 - Final Output')
+```
+
+#### Coefficient Discussion
+The intercept of the final model tells us that there are typically ~3 cases of
+wine purchased. Some things to note: 
+
+  * As expected, the number of stars has the largest, positive impact on the
+  number of cases sold. This makes sense -- the higher the rating of a wine, the
+  more of it we would expect to be purchased.
+  * Label appeal has the second largest impact on the number of cases sold. They
+  say one shouldn't judge a book by its cover (or in this case, a wine by its
+  label), but it does appear to have quite a significant impact on sales. 
+  * Alcohol also has a small positive impact on the number of cases purchased.
+  This means that the more alcohol a wine has, the more cases of it will be 
+  purchased. 
+  * Acid Index, Sulphates, pH, Chlorides, and VolatileAcidity all have a
+  negative impact on the number of cases sold. 
+
+# SELECT MODELS
+## Model Selection Criteria
+We will look at RMSE and MAE as our metrics and select the model which performs
+best on both. If no model performs best on both, the AIC of the model results on
+the training set will be used to break the tie, as the AIC is an estimate of the
+average out-of-sample performance of the model.
+
+```{r compTable}
+compTable <- data.table(Models = c("Poisson 1", "Poisson 2",
+                                   "Neg. Binom. 1", "Neg. Binom. 2",
+                                   "MultiLinear 1", "MultiLinear 2"),
+                        RMSE = double(6), MAE = double(6),
+                        TrainAIC = double(6))
+```
+
+## Model Test Results
+The test set data needs to be processed identically to the training set. Since
+the number of cases needs to be integral the predicted values will be rounded to
+the nearest integer.
+
+### Poisson Model 1
+
+```{r m1TestProcess}
+# P1 & NB1: process test data
+m1tst <- copy(tstSet)
+m1tst[, Rated := factor(ifelse(is.na(STARS), 'Unrated', 'Rated'),
+                        levels = c('Unrated', 'Rated'),
+                        labels = c('Unrated', 'Rated'))]
+set.seed(89)
+m1tstI <- preProcess(m1tst, method =c('nzv', 'bagImpute'))
+m1tst[is.na(STARS), STARS := 0L]
+m1tstImp <- predict(m1tstI, newdata = m1tst)
+```
+```{r m1PTest}
+# P1: Test Model
+m1PtstPred <- round(predict(m1PFit, newdata = m1tstImp))
+
+compTable[1, 2] <- m1PRMSE <- RMSE(m1PtstPred, m1tstImp$TARGET)
+compTable[1, 3] <- m1PMAE <- MAE(m1PtstPred, m1tstImp$TARGET)
+compTable[1, 4] <- m1PFitAIC
+```
+
+**Poisson Model 1** has an RMSE of 
+`r prettyNum(m1PRMSE, digits = 2L)`, an MAE of 
+`r prettyNum(m1PMAE, digits = 2L)`, and a training AIC of
+`r prettyNum(m1PFitAIC, digits = 2L)`.
+
+### Poisson Model 2
+
+```{r m2TestProcess}
+set.seed(525)
+m2test <- copy(tstSet[,-1])
+m2test[,c(2:8,11:12)] <- abs(m2test[,c(2:8,11:12)])
+m2test$STARS[is.na(m2test$STARS)] <- 0
+m2test.impute <- mice(m2test, method = 'pmm', print = FALSE)
+m2test <- complete(m2test.impute)
+m2test.r <- m2test$TARGET
+m2test.p <- m2test[,-1]
+pre.process <- preProcess(m2test.p, method = c("YeoJohnson"))
+m2test.p <- predict(pre.process, m2test.p)
+m2test[,c(2:13,15)] <- m2test.p[,c(1:12,14)]
+```
+```{r m2PTest}
+# ZIP2: Test Model
+m2PtstPred = round(predict(m2.fpmodel, newdata = m2test))
+compTable[2, 2] <- m2PRMSE <- RMSE(m2PtstPred, m2test.r)
+compTable[2, 3] <- m2PMAE <- MAE(m2PtstPred, m2test.r)
+compTable[2, 4] <- m2.poisson.aic
+```
+
+**Poisson Model 2** has an RMSE of 
+`r prettyNum(m2PRMSE, digits = 2L)`, an MAE of 
+`r prettyNum(m2PMAE, digits = 2L)`, and a training AIC of 
+`r prettyNum(m2.poisson.aic, digits = 2L)`.
+
+### Negative Binomial Model 1
+
+```{r m1NBTest}
+# NB1: Test Model
+m1NBtstPred <- round(predict(m1NBFit, newdata = m1tstImp))
+compTable[3, 2] <- m1NBRMSE <- RMSE(m1NBtstPred, m1tstImp$TARGET)
+compTable[3, 3] <- m1NBMAE <- MAE(m1NBtstPred, m1tstImp$TARGET)
+compTable[3, 4] <- m1NBFitAIC 
+```
+
+**Negative Binomial Model 1** has an RMSE of
+`r prettyNum(m1NBRMSE, digits = 2L)`, an MAE of
+`r prettyNum(m1NBMAE, digits = 2L)`, and a training AIC of
+`r prettyNum(m1NBFitAIC, digits = 2L)`.
+
+### Negative Binomial Model 2
+
+```{r m2NBTest}
+# NB2: Test Model
+m2NBtstPred <- round(predict(m2NBFit, newdata = m3test))
+compTable[4, 2] <- m2NBRMSE <- RMSE(m2NBtstPred, m3test$TARGET)
+compTable[4, 3] <- m2NBMAE <- MAE(m2NBtstPred, m3test$TARGET)
+compTable[4, 4] <- m2NBFitAIC <- AIC(m2NBFit)
+```
+
+**Negative Binomial Model 2** has an RMSE of
+`r prettyNum(m2NBRMSE, digits = 2L)`, an MAE of
+`r prettyNum(m2NBMAE, digits = 2L)`, and a training AIC of
+`r prettyNum(m2NBFitAIC, digits = 2L)`.
+
+### Multiple Linear Regression Model 1
+
+```{r m1MLRTest}
+# MLR1: Test Model
+m1MLRtstPred <- round(predict(m1MLRFit, newdata = m2test))
+compTable[5, 2] <- m1MLRRMSE <- RMSE(m1MLRtstPred, m2test.r)
+compTable[5, 3] <- m1MLRMAE <- MAE(m1MLRtstPred, m2test.r)
+compTable[5, 4] <- m1MLRFitAIC <- AIC(m1MLRFit)
+```
+
+**Multiple Linear Regression Model 2** has an RMSE of
+`r prettyNum(m1MLRRMSE, digits = 2L)`, an MAE of
+`r prettyNum(m1MLRMAE, digits = 2L)`, and a training AIC of
+`r prettyNum(m1MLRFitAIC, digits = 2L)`.
+
+### Multiple Linear Regression Model 2
+
+```{r m2MLTest}
+# MLR2: Test Model
+m2MLtstPred <- round(predict(m2MLFit, newdata = m3test))
+compTable[6, 2] <- m2MLMSE <- RMSE(m2MLtstPred, m3test$TARGET)
+compTable[6, 3] <- m2MLMAE <- MAE(m2MLtstPred, m3test$TARGET)
+compTable[6, 4] <- m2MLFitAIC <- AIC(m2MLFit)
+```
+
+**Multiple Linear Regression Model 1** has an RMSE of
+`r prettyNum(m2MLMSE, digits = 2L)`, an MAE of
+`r prettyNum(m2MLMAE, digits = 2L)`, and a training AIC of
+`r prettyNum(m2MLFitAIC, digits = 2L)`.
+
+## Comparsion
+
+```{r modelTestResults}
+# Compare results on test set
+kable(compTable, digits = 3L,
+      caption = "Model Results on Test Set")
+```
+
+## Selection
+The zero-inflated **Poisson Model 2** performed best on all the metrics and will
+be used to create the prediction on the evaluation set.
+
+# PREDICTION
+
+```{r readEval}
+# Read evaluation but not "IN" since that's dropped right away
+m2eval <- fread(paste0(urlRemote, pathGithub, fileEval), drop = 'IN')
+nobsE <- dim(m2eval)[[1]]
+```
+
+With `r nobsE` observations in the evaluation set, the predicted cases for each
+row will not be printed, rather some summary statistics and a histogram of the
+evaluations will be shown. The actual predictions are available in the
+`m2evalP` data object, as seen in the CODE APPENDIX.
+
+```{r processEval}
+# Process evaluation file as per zero-inflated Poisson model 2
+m2eval[, c(2:8, 11:12)] <- abs(m2eval[, c(2:8, 11:12)])
+m2eval$STARS[is.na(m2eval$STARS)] <- 0
+set.seed(525)
+m2eval.impute <- mice(m2eval, method = 'pmm', print = FALSE)
+m2eval <- complete(m2eval.impute)
+m2eval.r <- m2eval$TARGET
+m2eval.p <- m2eval[, -1]
+pre.process <- preProcess(m2eval.p, method = c("YeoJohnson"))
+m2eval.p <- predict(pre.process, m2eval.p)
+m2eval[, c(2:13, 15)] <- m2eval.p[, c(1:12, 14)]
+
+# Predict Cases
+m2evalP = as.data.frame(round(predict(m2.fpmodel, newdata = m2eval)))
+colnames(m2evalP) <- 'Cases'
+kable(table(m2evalP), caption = "Predicted Cases")
+ggplot(m2evalP, aes(x = Cases)) +
+  geom_histogram(binwidth = 1, center = 0,
+                 fill = 'firebrick4', color = 'black') +
+  scale_x_continuous(breaks = 0:8) +
+  ggtitle("Histogram of Predicted Cases")
+```
+
+# REFERENCES
+
+  * Kuhn, M. (2019, March 27). *The `caret` Package*.
+  https://topepo.github.io/caret/pre-processing.html#imputation
+  * Yeo, I., & Johnson, R. (2000). A New Family of Power Transformations to
+  Improve Normality or Symmetry. **Biometrika**, 87(4), 954--959.
+  Retrieved November 26, 2020, from http://www.jstor.org/stable/2673623
+  
+
+# CODE APPENDIX
+```{r setup2, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, eval=FALSE)
+```
+<!-- Assignment -->
+```{r loadData}
+```
+<!-- Data Exploration -->
+```{r missingVal}
+```
+```{r statsN}
+```
+```{r graphsD}
+```
+```{r graphsH}
+```
+```{r corrgram}
+```
+```{r targetH}
+```
+<!-- Data Preparation -->
+```{r trainTestSplit}
+```
+```{r model1addVars}
+```
+```{r model1impute}
+```
+```{r m1postImputeD}
+```
+```{r m1postImputeH}
+```
+```{r m2clean}
+```
+```{r model3impute}
+```
+<!-- Build Models -->
+```{r m1PTrain}
+```
+```{r m1PTable}
+```
+```{r m1PFitCheck}
+```
+```{r m1PvarImp}
+```
+```{r m1NBTrain}
+```
+```{r m1NBTable}
+```
+```{r m1NBvarImp}
+```
+```{r m1PNB}
+```
+```{r m2poisson}
+```
+```{r m2PTable}
+```
+```{r m2PFitCheck}
+```
+```{r m1MLRFit}
+```
+```{r m1MLRTable}
+```
+```{r m2NBTrainBase}
+```
+```{r m2NBTrain}
+```
+```{r m2MLTrainBase}
+```
+```{r m2MLTrain}
+```
+<!-- Select Models -->
+```{r compTable}
+```
+```{r m1TestProcess}
+```
+```{r m1PTest}
+```
+```{r m2TestProcess}
+```
+```{r m2PTest}
+```
+```{r m1NBTest}
+```
+```{r m2NBTest}
+```
+```{r m1MLRTest}
+```
+```{r m2MLTest}
+```
+```{r modelTestResults}
+```
+<!-- Predictions -->
+```{r readEval}
+```
+```{r processEval}
+```
